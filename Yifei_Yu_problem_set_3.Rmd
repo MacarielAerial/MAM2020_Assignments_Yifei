@@ -1,0 +1,704 @@
+---
+title: "Assignment Session 3: Regression"
+author: "Yifei Yu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: zenburn
+    toc: yes
+    toc_float: yes
+---
+
+
+```{r huxtable-stuff, include=FALSE}
+options("huxtable.knit_print_df" = FALSE)
+library(lubridate)
+library(here)
+library(moderndive)
+library(tidyverse)
+library(ggfortify)
+library(infer)
+library(mosaic)
+library(huxtable)
+library(kableExtra)
+library(tidyquant)
+library(readxl) #need to load readxl explicitly, as it is not a core tidyverse 
+```
+
+# Task 1: Introduction to the Capital Asset Pricing Model (CAPM)
+```{r load-data, eval=TRUE, message=FALSE, warning=FALSE}
+library(tidyquant)
+myStocks <- c("AAPL","JPM","DIS","DPZ","ANF","SPY" ) %>%
+  tq_get(get  = "stock.prices",
+         from = "2011-01-01",
+         to   = "2019-06-30") %>%
+  group_by(symbol) 
+
+glimpse(myStocks) # examine the structure of the resulting data frame
+```
+
+### Calculating financial returns
+
+```{r calculate_returns, message=FALSE, warning= FALSE}
+
+#calculate daily returns
+myStocks_returns_daily <- myStocks %>%
+  tq_transmute(select     = adjusted, 
+               mutate_fun = periodReturn, 
+               period     = "daily", 
+               type       = "log",
+               col_rename = "daily.returns",
+               cols = c(nested.col))  
+
+#calculate monthly  returns
+myStocks_returns_monthly <- myStocks %>%
+  tq_transmute(select     = adjusted, 
+               mutate_fun = periodReturn, 
+               period     = "monthly", 
+               type       = "arithmetic",
+               col_rename = "monthly.returns",
+               cols = c(nested.col)) 
+
+#calculate yearly returns
+myStocks_returns_annual <- myStocks %>%
+  group_by(symbol) %>%
+  tq_transmute(select     = adjusted, 
+               mutate_fun = periodReturn, 
+               period     = "yearly", 
+               type       = "arithmetic",
+               col_rename = "yearly.returns",
+               cols = c(nested.col))
+
+```
+
+$Return(t+1)= \frac{Adj.Close(t+1)}{Adj.Close (t)}-1$
+
+$Return(t+1)= LN\frac{Adj.Close(t+1)}{Adj.Close (t)}$
+
+### Summarising the data set
+```{r quick_density_plot, echo=FALSE, message=FALSE, warning=FALSE}
+
+mosaic::favstats(daily.returns ~ symbol,  data=myStocks_returns_daily) %>% 
+  mutate(
+    annual_mean = mean *250,
+    annual_sd = sd * sqrt(250)
+  ) %>% 
+  select(symbol, min, median, max, mean, sd, annual_mean, annual_sd)  %>% 
+  kable() %>%
+  kable_styling(c("striped", "bordered")) 
+
+ggplot(myStocks_returns_daily, aes(x=daily.returns, fill=symbol))+
+  geom_density()+
+  coord_cartesian(xlim=c(-0.05,0.05)) + 
+  scale_x_continuous(labels = scales::percent_format(accuracy = 2))+
+  facet_grid(rows = (vars(symbol))) + 
+  theme_bw()+
+  labs(x="Daily Returns", y="Density", title = "Charting the Distribution of Daily Log Returns")+
+  guides(fill=FALSE) +
+  NULL
+```
+
+```{r annual_returns_plot, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+ggplot(myStocks_returns_annual, aes(x=symbol, y=yearly.returns, color=symbol)) +
+  geom_boxplot()+
+  geom_jitter()+
+  labs(x="Stock", y="Returns", title = "Boxplot of Annual Returns")+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 2))+
+  guides(color=FALSE) +
+  theme_bw()+
+  NULL
+
+
+ggplot(myStocks_returns_annual, aes(x=year(date), y=yearly.returns, fill=symbol)) +
+  geom_col(position = "dodge")+
+  labs(x="Year", y="Returns", title = "Annual Returns")+
+  scale_y_continuous(labels = scales::percent)+
+  guides(fill=guide_legend(title=NULL))+
+  theme_bw()+
+  NULL
+  
+```
+
+### Minimum and maximum price of each stock by quarter
+
+```{r minMiaxbyQ, echo=FALSE, message=FALSE, warning=FALSE}
+##Find min and max prices by quarter
+myStocks_max_by_qtr <- myStocks %>%
+  group_by(symbol) %>%
+  tq_transmute(select     = adjusted, 
+               mutate_fun = apply.quarterly, 
+               FUN        = max, 
+               col_rename = "max.close") %>%
+  mutate(year.qtr = paste0(year(date), "-Q", quarter(date))) %>%
+  select(-date)
+
+# The minimum each quarter can be retrieved in the same way. 
+# The data frames can be joined using left_join to get the max and min by quarter.
+
+myStocks_min_by_qtr <- myStocks %>%
+  group_by(symbol) %>%
+  tq_transmute(select     = adjusted, 
+               mutate_fun = apply.quarterly, 
+               FUN        = min, 
+               col_rename = "min.close") %>%
+  mutate(year.qtr = paste0(year(date), "-Q", quarter(date))) %>%
+  select(-date)
+
+myStocks_by_qtr <- left_join(myStocks_max_by_qtr, myStocks_min_by_qtr,
+                         by = c("symbol"   = "symbol",
+                                "year.qtr" = "year.qtr"))
+
+# Visualize min-max by quarter. 
+myStocks_by_qtr %>%
+  ggplot(aes(x = year.qtr, color = symbol)) +
+  geom_segment(aes(xend = year.qtr, y = min.close, yend = max.close),
+               size = 1) +
+  geom_point(aes(y = max.close), size = 2) +
+  geom_point(aes(y = min.close), size = 2) +
+  facet_wrap(~ symbol, ncol = 2, scale = "free_y") +
+  labs(title = "Min/Max Price By Quarter",
+       y = "Stock Price", x= "Date", color = "") +
+  scale_y_continuous(labels = scales::dollar) +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, size=8),
+         axis.title.x = element_blank())+
+  guides(color=FALSE)+
+  NULL
+```
+
+### Sharpe Ratio
+
+$Sharpe Ratio = \frac{R_{p}-R_{f}}{\sigma_{p}}$</center>
+
+```{r sharpe_ratio, message=FALSE, warning=FALSE}
+myStocks_returns_monthly %>%
+  tq_performance(Ra = monthly.returns, #the name of the variable containing the returns of the asset
+                 Rb = NULL, 
+                 performance_fun = SharpeRatio) %>% 
+  kable() %>%
+  kable_styling(c("striped", "bordered")) 
+```
+
+
+
+### Investment Growth
+
+```{r wealth_index, echo=FALSE,message=FALSE, warning=FALSE}
+#calculate 'daily'wealth' returns, or what a 1000 investment will grow to 
+cumulative_wealth <- myStocks_returns_daily %>%
+  dplyr::mutate(wealth.index = 1000 * cumprod(1 + daily.returns))
+
+
+wealthplot <- ggplot(cumulative_wealth, aes(x=date, y = wealth.index, color=symbol))+
+  geom_line()+
+  labs(x="Year", y="Value of investment", title = "Growth of a $1000 investment over time")+
+  scale_y_continuous(labels = scales::dollar) +
+  guides(color=guide_legend(title=NULL))+
+  theme_bw() +
+  NULL
+
+wealthplot
+
+```
+
+### Scatterplots of individual stocks returns versus S&P500 Index returns
+
+```{r correlationMatrix, message= FALSE, warning=FALSE}
+#calculate daily returns
+table_capm_returns <- myStocks_returns_daily %>%
+            spread(key = symbol, value = daily.returns)  #just keep the period returns grouped by symbol
+
+table_capm_returns[-1] %>% #exclude "Date", the first column, from the correlation matrix
+  GGally::ggpairs() +
+  theme_bw()+
+    theme(axis.text.x = element_text(angle = 90, size=8),
+         axis.title.x = element_blank())
+
+```
+
+
+### Fit a regression model of AAPL returns on SPY returns
+
+```{r AAPL_CAPM, echo=FALSE}
+library(broom)
+library(ggfortify)
+
+# draw a scatterplot of AAPL returns (Y) vs SPY (on the X axis), 
+# data = table_capm_returns)
+
+ggplot(data = table_capm_returns, aes(x = SPY, y = AAPL)) +
+  geom_point()
+
+
+#fit the linear model
+aapl_capm <- lm(AAPL ~ SPY, data = table_capm_returns)
+
+aapl_capm %>% 
+  get_regression_table()
+
+#pull the value for the AAPL beta and store it to a variable we can refer later on
+aapl_beta <- aapl_capm %>% 
+  get_regression_table() %>% 
+  select(term, estimate) %>% 
+  filter(term == 'SPY') %>% 
+  pull
+
+
+aapl_capm %>% 
+  get_regression_summaries()
+
+#check residuals
+autoplot(aapl_capm, which=1:3)+
+  theme_minimal()
+
+```
+
+### Regression Coefficient for AAPL Stock
+
+```{r rolling_beta, message=FALSE, message=FALSE}
+
+regr_fun <- function(data) {
+  coef(lm(AAPL ~ SPY, data = timetk::tk_tbl(data, silent = TRUE)))
+}
+
+table_capm_returns  <- table_capm_returns  %>%
+  tq_mutate(mutate_fun = rollapply,
+            width      = 125,
+            FUN        = regr_fun,
+            by.column  = FALSE,
+            col_rename = c("coef.0", "coef.1"))
+
+# Using ggformula
+ggplot(table_capm_returns, aes(x=date, y=coef.1))+
+  geom_line()+
+  labs(x="Date", 
+       y="AAPL beta coefficient", 
+       title = "AAPL ~ SPY: Visualizing 6-month Rolling Beta Coefficient") +
+  theme_minimal()+
+  geom_hline(yintercept=aapl_beta, size = 1,color="blue")
+
+```
+
+#### Model Interpretation AAPL
+$Return_{AAPL} = 1.018 * Return_{SPY}$
+The model is a simple regression model with the return of S&P 500 stock as the independent variable and the return of Apple stock as the dependent variable. $\beta$ is statistically significant because the t-statistic of the regression coefficient is much larger than 2. The regression coefficient is estimated to be 1.018 and 32.3% of the variablity of Apple stock return is explained by S&P 500 index return.
+
+```{r}
+ggplot(data = table_capm_returns, aes(x = AAPL, y = SPY)) + 
+  geom_point() +
+  labs(x="AAPL Stock Return", 
+       y="SPY Stock Return", 
+       title = "Scatter Plot of AAPL ~ SPY Stock Return")
+```
+
+```{r}
+autoplot(aapl_capm, which=1:3)+
+  theme_minimal()
+```
+
+#### Answer to Questions
+**Is there a pattern in the residuals, or do they appear to be 'random'?**  
+The residuals appear to be randomly distributed around zero.    
+**Do they seem to follow a Normal Distribution, or is the Normal Q-Q plot almost in a straight line ?**  
+They do seem to follow a Normal Distribution within the sample range. The curvature outside the range [-2, 2] appears to have been caused by fewer samples with extreme values.  
+**Is the variance of the residuals constant (homoskedastic) or does it seem to increase with increasing values of X?**  
+The variance seems to be homoskedastic because there doesn't seem to be a pattern within the residuals.  
+
+### CAPM Analysis for ANF
+
+```{r ANF}
+
+ggplot(data = table_capm_returns, aes(x = SPY, y = ANF)) +
+  geom_point() +
+  labs(x="ANF Stock Return", 
+       y="SPY Stock Return", 
+       title = "Scatter Plot of ANF ~ SPY Stock Return")
+
+anf_capm <- lm(ANF ~ SPY, data = table_capm_returns)
+
+anf_capm %>% 
+  get_regression_table()
+
+anf_beta <- anf_capm %>% 
+  get_regression_table() %>% 
+  select(term, estimate) %>% 
+  filter(term == 'SPY') %>% 
+  pull
+
+
+anf_capm %>% 
+  get_regression_summaries()
+
+autoplot(anf_capm, which=1:3)+
+  theme_minimal()
+```
+
+#### Description
+The residuals appear to be random except some outliers which cannot be explained by the model. The proportion of variability explained by index return is only 10.3% for ANF stock. The regression coefficient is 1.142 which is only slightly riskier than Apple stock.
+
+### CAPM Analysis for DIS
+
+```{r DIS}
+ggplot(data = table_capm_returns, aes(x = SPY, y = DIS)) +
+  geom_point() +
+  labs(x="DIS Stock Return", 
+       y="SPY Stock Return", 
+       title = "Scatter Plot of DIS ~ SPY Stock Return")
+
+dis_capm <- lm(DIS ~ SPY, data = table_capm_returns)
+
+dis_capm %>% 
+  get_regression_table()
+
+dis_beta <- dis_capm %>% 
+  get_regression_table() %>% 
+  select(term, estimate) %>% 
+  filter(term == 'SPY') %>% 
+  pull
+
+
+dis_capm %>% 
+  get_regression_summaries()
+
+#check residuals
+autoplot(dis_capm, which=1:3)+
+  theme_minimal()
+```
+
+#### Description
+The residuals appear to be random except some outliers which cannot be explained by the model. The proportion of variability explained by index return is as high as 46.9% for DIS stock. The regression coefficient is 0.984 which means it is slightly less risky than the market.
+
+
+### CAPM Analysis for DPZ
+
+```{r DPZ}
+ggplot(data = table_capm_returns, aes(x = SPY, y = DPZ)) +
+  geom_point() +
+  labs(x="DPZ Stock Return", 
+       y="SPY Stock Return", 
+       title = "Scatter Plot of DPZ ~ SPY Stock Return")
+
+dpz_capm <- lm(DPZ ~ SPY, data = table_capm_returns)
+
+dpz_capm %>% 
+  get_regression_table()
+
+dpz_beta <- dpz_capm %>% 
+  get_regression_table() %>% 
+  select(term, estimate) %>% 
+  filter(term == 'SPY') %>% 
+  pull
+
+
+dpz_capm %>% 
+  get_regression_summaries()
+
+#check residuals
+autoplot(dpz_capm, which=1:3)+
+  theme_minimal()
+```
+
+#### Description
+The residuals appear to be random except some outliers which cannot be explained by the model. The proportion of variability explained by index return is 21.9% for DPZ stock. The regression coefficient is 0.866 which means it is less risky than the market.
+
+### CAPM Analysis for JPM
+
+```{r JPM}
+ggplot(data = table_capm_returns, aes(x = SPY, y = JPM)) +
+  geom_point() +
+  labs(x="JPM Stock Return", 
+       y="SPY Stock Return", 
+       title = "Scatter Plot of JPM ~ SPY Stock Return")
+
+jpm_capm <- lm(JPM ~ SPY, data = table_capm_returns)
+
+jpm_capm %>% 
+  get_regression_table()
+
+jpm_beta <- jpm_capm %>% 
+  get_regression_table() %>% 
+  select(term, estimate) %>% 
+  filter(term == 'SPY') %>% 
+  pull
+
+
+jpm_capm %>% 
+  get_regression_summaries()
+
+#check residuals
+autoplot(jpm_capm, which=1:3)+
+  theme_minimal()
+```
+
+```{r}
+huxtable::huxreg(aapl_capm, anf_capm, dpz_capm, dis_capm,
+       number_format = "%.2f")
+```
+
+#### Description
+The residuals appear to be random except some outliers which cannot be explained by the model. The proportion of variability explained by index return is as high as 58.2% for DPZ stock. The regression coefficient is 1.303 which means it is much riskier than the market.
+
+### Summary of Findings
+JPM has the highest beta while DPZ has the lowest. Which stocks has the higest R2? The highest beta? DPZ has the highest R2 and Apple stock has the lowest R2. This indicates DPZ stock is the stock that is the least risky and the most correlated with the market.
+
+# Task 2: Pay Discrimination
+```{r}
+data <- read_csv(here::here("Data", "banksalary.csv"))
+data <- data %>%
+  mutate(senior = senior/12,
+         age = age/12,
+         exper = exper/12,
+         sex = as_factor(sex)) %>% 
+          select('sex', everything())
+```
+## Question 1
+**Identify observational units, the response, or target, variable, and explanatory variables.**  
+There are 93 observations. The response variable is the salary at the beginning of the hire. Sex, seniority, age, education and experience are explanatory variables.
+
+## Question 2
+**Calculate summary statistics by sex. The mean starting salary of male workers ($5957) was 16% higher than the mean starting salary of female workers ($5139).  Confirm these mean salaries.  Plot a boxplot or denisty plot to graphically show the difference. Is this enough evidence to conclude gender discrimination exists?  If not, what further evidence would you need?**  
+```{r}
+data %>%
+  group_by(sex) %>%
+  summarize(mean(bsal))
+
+ggplot(data = data, aes(sex, bsal, fill = sex)) + 
+  geom_boxplot() +
+  labs(title = "Boxplot of Beginning Salary Difference Between Male and Female Workers", x = "Gender", y = "Beginning Salary") +
+  theme_bw()
+```
+
+## Question 3
+**How would you expect age, experience, and education to be related to starting salary?  Generate appropriate exploratory plots; are the relationships as you expected?  What implications does this have for modelling?**  
+```{r, warning = FALSE, message=FALSE}
+GGally::ggpairs(data, column = 1:7) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+Age is basically not correlated with starting salary. Eduaction is correlated with starting salary and experience is weakly correlated with starting salary. The relationship is not what I expected because I assumed age would be significantly correlated with starting salary. This provides information for variable selection since if age is basically uncorrelated with starting salary, it can be left out of the modelling process.  
+
+## Question 4
+**Why might it be important to control for seniority (number of years with the bank) if we are only concerned with the salary when the worker started?**  
+
+## Question 5
+Seniority is used to control for inflation from when the workers are hired and when the study is conducted. 
+
+## Question 6
+**By referring to exploratory plots and summary statistics, are any explanatory variables (including sex) closely related to each other?  What implications does this have for modelling?**  
+Yes. Age and experience are highly correlated. Age and education are also correlated. Sex and education are correlated as well. This is consistent with the common sense that people necessarily become older as they obtain more education. This phenonemon raises multicollinearity issues when variance of individual parameters estimated increases as explanatory variables are strongly correlated with one another.  
+
+## Question 7
+**Fit a simple linear regression model with starting salary as the response and experience as the sole explanatory variable (Model 1).  Interpret the intercept and slope of this model; also interpret the R-squared value.  Is there a significant relationship between experience and starting salary?**  
+```{r}
+model_1 <- lm(bsal ~ exper, data = data)
+model_1 %>% 
+  get_regression_table()
+model_1 %>%
+  get_regression_summaries()
+
+#check residuals
+autoplot(model_1, which=1:3)+
+  theme_minimal()
+```
+The regression parameter 15.611 is not statistically significant because the t-statistic is 1.613 which is smaller than 2. The intercept is 5289.022 which is the average salary for the newly hired. The R2 value is only 2.8% which is quite small. The relationship between starting salary and experience is very weak. 
+
+## Question 8
+**Does Model 1 meet all linear regression assumptions?  List each assumption and how you decided if it was met or not.**  
+Liner regression assumptions include linearity in parameters, random sampling, homoskedasticity and zero conditional mean. Parameters are linear by default because we use a linear model function. Data are assumed to be gathered randomly. homoskedasticity is obviously violated because the residual values are not randomly distributed against the fitter values. As fitted values increase, the dispersion of residual values reduces. Whether zero conditional mean assumption is met or not is unknown because we don't know if there is any other variables within the error term that correlate with starting salary.
+
+## Question 9
+**Is a model with all 4 confounding variables (Model 2, with `senior`, `educ`, `exper`, and `age`) better than a model with just experience (Model 1)?  Justify with an appropriate significance test in addition to summary statistics of model performance.**  
+```{r}
+model_2 <- lm(bsal ~ exper + senior + educ + age, data = data)
+model_2 %>% 
+  get_regression_table()
+model_2 %>%
+  get_regression_summaries()
+
+#check residuals
+autoplot(model_2, which=1:3)+
+  theme_minimal()
+
+summary(model_2)$fstatistic
+```
+Model 2 which includes are variables are better than model 1 which only includes experience because model 2 has a higher R2. We are confident that these newly added variables are significant in explaining the dependent variable starting salary because of two reasons: firstly t-statistics for all except the age variables are larger than 2 in absolute value and f-statistic is larger than 10.  
+
+## Question 10
+**You should have noticed that the term for age was not significant in Model 2.  What does this imply about age and about future modeling steps?**  
+Age is correlated with seniority and education. When all variables are put into the same model, the explanatory power of age is diluted by seniority and education. The implies a better variable selection process is required to reduce multicollinearity.  
+
+## Question 11
+**Generate an appropriate coded scatterplot to examine a potential age-by-experience interaction.  How would you describe the nature of this interaction?**  
+```{r}
+ggplot(data = data, aes(x = age, y = exper)) + 
+  geom_point() +
+  geom_smooth() +
+  labs(title = "Scatter Plot Between Age and Experience Variables",
+      x = 'Age (in years)',
+      y = 'Experience (in years)')
+
+```
+
+## Question 12
+**A potential final model (Model 3) would contain terms for seniority, education, and experience in addition to sex.  Does this model meet all regression assumptions?  State a 95% confidence interval for the effect of sex and interpret this interval carefully in the context of the problem.**  
+```{r}
+model_3 <- lm(bsal ~ exper + senior + educ + sex, data = data)
+model_3 %>% 
+  get_regression_table()
+model_3 %>%
+  get_regression_summaries()
+
+#check residuals
+autoplot(model_3, which=1:3)+
+  theme_minimal()
+
+```
+The 95% confidence interval for the effect of sex is [-956.455, -488.151]. The confidence interval doesn't include zero and it is negative on both sides. Together with the negative regression coefficient of the variable sexFEMALE, the confidence interval suggests strong evidence that male workers earn more than female workers.
+The linearity in parameters and random sampling assumptions are still assumed to be true given our data. Homoskedasticity is also true because the residuals seem to be randomly distributed around zero according to the residual plot. Zero conditional mean is more likely to hold in model 3 than in previous models because more variables are included in the modelling process which reduces the likelihood that something in the error term is correlated with the independent variables.  
+
+## Question 13
+**Based on Model 3, what conclusions can be drawn about gender discrimination at Harris Trust?  Do these conclusions have to be qualified at all, or are they pretty clear cut?**  
+The evidence is strong for the claim that female workers have lower salary than male workers but the cause of the salary difference may or may not be fully attributed to gender discrimination. For example, it is possible for females to have jobs that pay less than males' jobs. The difference in salary can be caused by difference in job position instead of deliberate low pay for females with the same positions.  
+
+## Question 14
+**Build your own final model for this study and justify the selection of your final model.  You might consider interactions with gender, since those terms could show that discrimination is stronger among certain workers.  Based on your final model, do you find evidence of gender discrimination at Harris Trust?**  
+Yes. I do find evidence of gender pay gap among employee of Harris Trust because gender is a significant variable in explaining starting salary after controling for education, inflation and experience.  
+```{r}
+model_4 <- lm(bsal ~ exper + senior + educ * sex + sex + exper , data = data)
+model_4 %>% 
+  get_regression_table()
+model_4 %>%
+  get_regression_summaries()
+
+#check residuals
+autoplot(model_4, which=1:3)+
+  theme_minimal()
+
+```
+
+
+# Challenge 1: Brexit plot
+
+```{r}
+brexit <- read_csv(here::here("Data", "brexit_results.csv")) %>%
+    gather(key = "party", value = "fraction", 2:5, ) %>%
+    mutate(fraction = as.numeric(fraction))
+glimpse(brexit)
+ggplot(data = brexit, aes(x = fraction, y = leave_share, colour = factor(party, labels = c("Conservative", "Labour", "Lib Dems", "UKIP")))) +
+  geom_point(alpha = 0.8, size = 0.2) +
+  geom_smooth(method = lm) +
+  labs(title = "How political affliation translated to Brexit voting",
+        x = "Party % in the UK 2015 general election", 
+        y = "Leave % in the 2016 Brexit referendum",
+        color = "") +
+  scale_color_manual(values = c('#0087dc', '#d50000', '#FDBB30', '#EFE600')) +
+  theme_light() +
+  theme(legend.position = "bottom")
+  
+```
+
+# Challenge 2 - Yield Curve inversion
+```{r get_rates, warning=FALSE}
+# Get a list of FRED codes for US rates and US yield curve; choose monthly frequency
+# to see, eg., the 3-month T-bill https://fred.stlouisfed.org/series/TB3MS
+tickers <- c('TB3MS', # 3-month Treasury bill (or T-bill)
+             'TB6MS', # 6-month
+             'GS1',   # 1-year
+             'GS2',   # 2-year, etc....
+             'GS3',
+             'GS5',
+             'GS7',
+             'GS10',
+             'GS20',
+             'GS30')  #.... all the way to the 30-year rate
+
+# Turn  FRED codes to human readable variables
+myvars <- c('3-Month Treasury Bill',
+            '6-Month Treasury Bill',
+            '1-Year Treasury Rate',
+            '2-Year Treasury Rate',
+            '3-Year Treasury Rate',
+            '5-Year Treasury Rate',
+            '7-Year Treasury Rate',
+            '10-Year Treasury Rate',
+            '20-Year Treasury Rate',
+            '30-Year Treasury Rate')
+
+maturity <- c('3m', '6m', '1y', '2y','3y','5y','7y','10y','20y','30y')
+
+# be default R will sort these maturities alphabetically; but since we want
+# to keep them in that exact order, we recast maturity as a factor 
+# or categorical variable, with the levels defined as we want
+maturity <- factor(maturity, levels = maturity)
+
+# Create a lookup dataset
+mylookup<-data.frame(symbol=tickers,var=myvars, maturity=maturity)
+# Take a look:
+mylookup %>% 
+  knitr::kable()
+
+df <- tickers %>% tidyquant::tq_get(get="economic.data", 
+                   from="1960-01-01")   # start from January 1960
+
+glimpse(df)
+```
+
+```{r join_data, warning=FALSE}
+
+yield_curve <-left_join(df,mylookup,by="symbol") %>%
+              mutate(date = as.Date(date),
+                     year = as.numeric(format(date,'%Y')))
+```
+
+## Plotting the yield curve
+### Yields on US rates by duration since 1960
+```{r}
+ggplot(data = yield_curve, aes(x = date, y = price, color = maturity))+
+        geom_line(size = 0.1) +
+        facet_wrap(~maturity, ncol = 2) +
+        labs(x = "", y = "%", title = 'Yields on U.S. Treasuary rates by duration since 1960',
+             caption = "Source: St. Louis Federal Reserve Economic Database(FRED)") +
+        theme_light() +
+        theme(legend.position = "none")
+```
+
+### Monthly yields on US rates by duration since 1999 on a year-by-year basis
+```{r, warning = FALSE, message = FALSE}
+yield_curve_new <- yield_curve %>%
+  group_by(maturity, year) %>%
+  summarize(price = mean(price)) %>%
+  filter(year >= 1999) %>%
+  ungroup() %>%
+  mutate(year = as.factor(year),
+         maturity = as.factor(maturity),
+         price = as.numeric(price))
+
+ggplot(data = yield_curve_new, aes(x = maturity, y = price, color = year, group = 1)) + 
+  geom_smooth() +
+  facet_wrap(~year, ncol = 3) +
+  theme(legend.position = "none") +
+  labs(x = "Maturity", y = "Yield(%)", title = "US Yield Curve since 1999- when does it flatten?")
+```
+
+
+
+### 3-month and 10-year yields since 1999
+```{r}
+yield_curve_new_2 <- yield_curve %>%
+  filter(maturity == c('3m', '10y'), year >= 1999)
+
+ggplot(data = yield_curve_new_2, aes(x = date, y = price, color = maturity)) +
+  geom_line() +
+  labs(color = "",
+      title = "Yield on 3-month and 10-year US Treasury rates since 1999",
+      x = "",
+      y = "%",
+      caption = "Source: St. Louis Federal Reserve Economic Database(FRED)") +
+  theme_light()
+```
+<center>
+![](images/yield3.png)
+</center>
